@@ -1,0 +1,32 @@
+name = "MPSFast"
+uuid = "c3f2d8a0-9e45-11ee-8c90-0242ac120002"
+version = "0.1.0"
+authors = ["Diego Ferreira"]
+
+[deps]
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+ITensorMPS = "0d1a4710-d33b-49a5-8f18-73bdf49b47e2"
+ITensors = "9136182c-28ba-11e9-034c-db9fb085ebd5"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+TSVD = "9449cd9e-2762-5aa3-a617-5413e99d722e"
+
+[compat]
+Distributions = "0.25"
+ITensorMPS = "0.4.1"
+ITensors = "0.9.30"
+JLD2 = "0.4"
+Plots = "1.41.6"
+StatsBase = "0.34.11"
+TSVD = "0.4"
+julia = "1.9"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

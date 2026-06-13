@@ -1,0 +1,3 @@
+/notebooks/experiments/checkpoints/
+*.jld2
+Manifest.toml
