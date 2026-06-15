@@ -1,11 +1,14 @@
 """
     MPSFast
 
-Fast MPS Born-machine training for discrete path distributions.
+Fast MPS and TTN Born-machine training for discrete path distributions.
 
 Provides DMRG-style BLAS-batched training, truncated-SVD bond updates,
 in-place Adam optimiser, sequential conditional sampling, bipartite
 entropies, and JLD2 checkpointing.
+
+Also provides a Binary Tree Tensor Network (BTT) Born machine (`BinaryTTN`)
+with analogous training (`train_ttn!`) and sampling (`sample_ttn`).
 
 The `Encoders` submodule translates continuous paths into integer physical-leg
 indices and, optionally, a feature matrix Φ for Gram-weighted inner products.
@@ -20,7 +23,9 @@ indices and, optionally, a feature matrix Φ for Gram-weighted inner products.
     boundary_vectors, lv_prefix, extend_lv_after_bond!,
     sample_paths_feature_map,
     bipartite_entropies, entropy_history, log_bond_spectrum!,
-    save_mps_bundle, load_mps_bundle, load_bond_log
+    save_mps_bundle, load_mps_bundle, load_bond_log,
+    BinaryTTN, init_ttn, ttn_amplitude, ttn_nll, root_canonicalize_ttn!,
+    train_ttn!, sample_ttn
 
 # Submodule
 
@@ -40,6 +45,7 @@ include("sampling.jl")
 include("analysis.jl")
 include("io.jl")
 include("Encoders.jl")
+include("ttn.jl")
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 export mps_amplitude
@@ -72,5 +78,14 @@ export log_bond_spectrum!
 export save_mps_bundle
 export load_mps_bundle
 export load_bond_log
+
+# ── TTN ───────────────────────────────────────────────────────────────────────
+export BinaryTTN
+export init_ttn
+export ttn_amplitude
+export ttn_nll
+export root_canonicalize_ttn!
+export train_ttn!
+export sample_ttn
 
 end # module MPSFast
