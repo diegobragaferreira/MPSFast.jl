@@ -804,6 +804,27 @@ function _train_log_flush!()
 end
 
 """
+    cosine_lr(epoch, n_epochs, η_max; η_min = η_max / 50) -> η_t
+
+Cosine-annealing learning-rate schedule.  Returns the learning rate for
+`epoch` (1-indexed) given a total of `n_epochs` epochs.
+
+    η(t) = η_min + ½(η_max − η_min)(1 + cos(π(t−1)/n_epochs))
+
+At `epoch = 1` the output equals `η_max`; at `epoch = n_epochs` it equals
+approximately `η_min`.  Pass as `lr_schedule` to `train_mps!`:
+
+    train_mps!(...; lr_schedule = cosine_lr)
+
+or with a custom η_min via a closure:
+
+    train_mps!(...; lr_schedule = (e, ne, η) -> cosine_lr(e, ne, η; η_min = 1e-5))
+"""
+function cosine_lr(epoch::Int, n_epochs::Int, η_max::Real; η_min::Real = η_max / 50)
+    η_min + 0.5 * (η_max - η_min) * (1 + cos(π * (epoch - 1) / n_epochs))
+end
+
+"""
     train_mps!(mps, xi_data, n_epochs, η, D_max, ε_cut; ...) -> nll_hist
 
 Full DMRG-style Born-machine training loop.
@@ -818,7 +839,7 @@ Each epoch performs:
 - `mps`            — MPS to train (mutated in place).
 - `xi_data`        — `(N, M)` integer matrix of encoded paths.
 - `n_epochs`       — number of full forward+backward sweep epochs.
-- `η`              — Adam learning rate.
+- `η`              — Adam learning rate (base value passed to `lr_schedule`).
 - `D_max`          — maximum bond dimension.
 - `ε_cut`          — singular-value truncation floor (0 = no floor).
 
@@ -828,6 +849,15 @@ Each epoch performs:
 - `checkpoint_every`, `checkpoint_at` — epoch cadences.
 - `bond_log`        — pre-allocated `Vector` to accumulate bond-spectrum records.
 - `verbose`, `bond_progress`, `nll_samples` — logging controls.
+- `lr_schedule`     — `f(epoch, n_epochs, η) -> η_t` called once per epoch.
+                      `nothing` = constant learning rate.
+- `val_data`        — held-out `(N_val, M)` integer matrix for validation NLL.
+                      When provided, validation NLL is computed each epoch.
+- `val_samples`     — number of rows to sample for the validation NLL estimate.
+- `patience`        — early-stopping: stop after this many consecutive epochs
+                      with no improvement in validation NLL. Ignored when
+                      `val_data === nothing`.
+- `val_nll_log`     — pre-allocated `Vector` appended with per-epoch val NLL.
 """
 function train_mps!(
     mps::Vector{Array{T,3}}, xi_data, n_epochs, η, D_max, ε_cut;
@@ -841,6 +871,11 @@ function train_mps!(
     checkpoint_meta    = nothing,
     bond_log           = nothing,
     feature_phi::Union{Nothing, AbstractMatrix} = nothing,
+    lr_schedule::Union{Nothing, Function}       = nothing,
+    val_data                                    = nothing,
+    val_samples::Int                            = 2_000,
+    patience::Int                               = typemax(Int),
+    val_nll_log                                 = nothing,
 ) where {T<:Real}
     Ml     = length(mps)
     Nd     = size(xi_data, 1)
@@ -849,6 +884,11 @@ function train_mps!(
     nll_hist   = Float64[]
     adam_state = AdamDict{T}()
     ws         = TrainWorkspace(T, Nd, d_loc, D_max; feature_phi = feature_phi)
+
+    # Early-stopping state (only active when val_data is provided)
+    best_val_nll      = Inf
+    patience_counter  = 0
+    stop_early        = false
 
     meta_base = Dict{String,Any}(
         "M" => Ml, "d" => d_loc, "eta" => η, "D_max" => D_max,
@@ -885,6 +925,9 @@ function train_mps!(
     for epoch in 1:n_epochs
         t_epoch = time()
         verbose && (println("— Epoch ", epoch, "/", n_epochs, " —"); _train_log_flush!())
+
+        # Per-epoch learning rate (cosine annealing or constant)
+        η_t = T(lr_schedule === nothing ? η : lr_schedule(epoch, n_epochs, η))
         # Right-canonicalize before the forward sweep so that every Renv[j+3] = I.
         # With left-canonical splits in the forward sweep, Lenv[j] = I as well, so
         # Z = ‖B‖²_F throughout — preventing Float32 overflow with large D_max.
@@ -905,7 +948,7 @@ function train_mps!(
         Lv = ones(T, Nd, 1)
         for j in 1:(Ml-1)
             bond_progress && verbose && (println("  · forward bond ", j, "/", Ml - 1); _train_log_flush!())
-            update_pair!(ws, mps, xi_data, j, η, D_max, ε_cut, Lenv, Renv, adam_state;
+            update_pair!(ws, mps, xi_data, j, η_t, D_max, ε_cut, Lenv, Renv, adam_state;
                          Lv_carry = Lv, bond_log = bond_log,
                          epoch = epoch, sweep = :forward, d_phys = d_loc)
             _refresh_norm_envs_after_bond_train!(mps, Lenv, Renv, j, ws)
@@ -939,7 +982,7 @@ function train_mps!(
         end
         for j in (Ml-1):-1:1
             bond_progress && verbose && (println("  · backward bond ", j, "/", Ml - 1); _train_log_flush!())
-            update_pair!(ws, mps, xi_data, j, η, D_max, ε_cut, Lenv, Renv, adam_state;
+            update_pair!(ws, mps, xi_data, j, η_t, D_max, ε_cut, Lenv, Renv, adam_state;
                          Lv_carry = lv_cache[j], bond_log = bond_log,
                          epoch = epoch, sweep = :backward, d_phys = d_loc)
             _refresh_norm_envs_after_bond_train!(mps, Lenv, Renv, j, ws)
@@ -963,10 +1006,39 @@ function train_mps!(
         bonds = join([size(mps[j], 3) for j in 1:Ml-1], ",")
         if verbose
             elapsed = round(time() - t_epoch; digits=3)
-            println("Epoch $epoch/$n_epochs | NLL ≈ $(round(nll; digits=4)) | bonds=[$bonds] | $(elapsed) s")
+            println("Epoch $epoch/$n_epochs | NLL ≈ $(round(nll; digits=4)) | η=$(round(Float64(η_t); sigdigits=3)) | bonds=[$bonds] | $(elapsed) s")
             _train_log_flush!()
         end
+
+        # ── Validation NLL + early stopping ───────────────────────────────────
+        if val_data !== nothing
+            Nv   = size(val_data, 1)
+            vidx = randperm(Nv)[1:min(val_samples, Nv)]
+            val_atomic = Threads.Atomic{Float64}(0.0)
+            Threads.@threads for k in 1:length(vidx)
+                i = vidx[k]
+                p = mps_amplitude(mps, val_data[i, :]; phi = ws.feature_phi)
+                Threads.atomic_add!(val_atomic, logZ - 2.0 * log(max(abs(Float64(p)), 1e-30)))
+            end
+            val_nll = val_atomic[] / length(vidx)
+            val_nll_log !== nothing && push!(val_nll_log, val_nll)
+            verbose && (println("  ↳ val NLL ≈ $(round(val_nll; digits=4))  (patience $patience_counter/$patience)"); _train_log_flush!())
+
+            if val_nll < best_val_nll
+                best_val_nll     = val_nll
+                patience_counter = 0
+            else
+                patience_counter += 1
+                if patience_counter >= patience
+                    verbose && (println("Early stopping at epoch $epoch (no val improvement for $patience epochs)"); _train_log_flush!())
+                    do_checkpoint(epoch)
+                    stop_early = true
+                end
+            end
+        end
+
         do_checkpoint(epoch)
+        stop_early && break
     end
 
     if save_final && checkpoint_dir !== nothing

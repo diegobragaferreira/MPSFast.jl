@@ -53,7 +53,7 @@ export init_mps
 
 # ── Training ──────────────────────────────────────────────────────────────────
 export TrainWorkspace
-export train_mps!
+export train_mps!, cosine_lr
 export nll_gradient!
 export update_pair!
 export boundary_vectors
