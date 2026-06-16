@@ -25,7 +25,10 @@ indices and, optionally, a feature matrix Φ for Gram-weighted inner products.
     bipartite_entropies, entropy_history, log_bond_spectrum!,
     save_mps_bundle, load_mps_bundle, load_bond_log,
     BinaryTTN, init_ttn, ttn_amplitude, ttn_nll, root_canonicalize_ttn!,
-    train_ttn!, sample_ttn
+    train_ttn!, sample_ttn,
+    init_ttn_classification, class_probabilities_ttn, predict_class_ttn,
+    classification_accuracy_ttn,
+    TTNInternalCut, ttn_subtree_leaves, ttn_internal_cuts, ttn_layer_entropy_summary
 
 # Submodule
 
@@ -87,5 +90,8 @@ export ttn_nll
 export root_canonicalize_ttn!
 export train_ttn!
 export sample_ttn
+export init_ttn_classification
+export class_probabilities_ttn, predict_class_ttn, classification_accuracy_ttn
+export TTNInternalCut, ttn_subtree_leaves, ttn_internal_cuts, ttn_layer_entropy_summary
 
 end # module MPSFast

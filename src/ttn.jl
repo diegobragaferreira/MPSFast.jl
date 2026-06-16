@@ -65,9 +65,28 @@ next power-of-2 padding are trivial (fixed, never updated).
 function init_ttn(n_sites::Int, d::Int, D_max::Int;
                   T::Type{<:Real}  = Float32,
                   rng              = Random.default_rng())
-
     N_pad = nextpow(2, max(n_sites, 2))
     d_vec = [j <= n_sites ? d : 1 for j in 1:N_pad]
+    return _init_ttn_from_dvec(n_sites, d_vec, N_pad, D_max; T = T, rng = rng)
+end
+
+"""
+    init_ttn_classification(M_path, d_path, n_classes, D_max; kwargs...) -> BinaryTTN
+
+Joint TTN over `M_path` encoded path sites plus one label leaf (`n_classes` outcomes).
+"""
+function init_ttn_classification(M_path::Int, d_path::Int, n_classes::Int, D_max::Int;
+                                 T::Type{<:Real}  = Float32,
+                                 rng              = Random.default_rng())
+    n_sites = M_path + 1
+    N_pad   = nextpow(2, max(n_sites, 2))
+    d_vec   = [j <= M_path ? d_path : (j == n_sites ? n_classes : 1) for j in 1:N_pad]
+    return _init_ttn_from_dvec(n_sites, d_vec, N_pad, D_max; T = T, rng = rng)
+end
+
+function _init_ttn_from_dvec(n_sites::Int, d_vec::Vector{Int}, N_pad::Int, D_max::Int;
+                             T::Type{<:Real}  = Float32,
+                             rng              = Random.default_rng())
 
     # Upward bond dimension at each heap node (saturates at D_max quickly).
     χ_up = zeros(Int, 2N_pad)
@@ -168,15 +187,14 @@ function _ttn_absorb_R_into_child_bond!(ttn::BinaryTTN{T},
     χ_l, χ_r, χ_u = size(Bp)
 
     if _ttn_left(hp) == h
-        # h is left child of hp: first index of Bp corresponds to h's upward bond.
-        # New Bp[:,old_χ_l,...] → R * old_Bp reshaped.
-        Bp_new = reshape(R * reshape(Bp, k, χ_r * χ_u), k, χ_r, χ_u)
+        # h is left child of hp: R is (k × χ_l) from the child QR.
+        Bp_new = reshape(R * reshape(Bp, χ_l, χ_r * χ_u), k, χ_r, χ_u)
         ttn.internals[hp] = T.(Bp_new)
     else
         # h is right child: second index of Bp.
-        Bt     = permutedims(Bp, (2,1,3))    # (χ_r, χ_l, χ_u)
-        Bt_new = reshape(R * reshape(Bt, k, χ_l * χ_u), k, χ_l, χ_u)
-        ttn.internals[hp] = T.(permutedims(Bt_new, (2,1,3)))
+        Bt     = permutedims(Bp, (2, 1, 3))    # (χ_r, χ_l, χ_u)
+        Bt_new = reshape(R * reshape(Bt, χ_r, χ_l * χ_u), k, χ_l, χ_u)
+        ttn.internals[hp] = T.(permutedims(Bt_new, (2, 1, 3)))
     end
 end
 
@@ -570,25 +588,381 @@ function _ttn_adam_internal!(ttn :: BinaryTTN{T},
     ttn.internals[h] .-= T.(step)
 end
 
+# ─── Sweep order (zigzag) ────────────────────────────────────────────────────
+
+"""Depth of internal heap node `h` from the root (`h = 1` → depth 0)."""
+@inline _ttn_internal_depth(h::Int) = Int(floor(log2(h)))
+
+"""Both children of internal `h` are physical leaves."""
+function _ttn_is_leaf_parent(h::Int, N_pad::Int)
+    hl = 2h; hr = 2h + 1
+    return _ttn_is_leaf(hl, N_pad) && _ttn_is_leaf(hr, N_pad)
+end
+
+"""Internal nodes whose children are both leaves (e.g. `h = 4…7` when `N_pad = 8`)."""
+function _ttn_leaf_parent_nodes(N_pad::Int)
+    [h for h in 1:(N_pad - 1) if _ttn_is_leaf_parent(h, N_pad)]
+end
+
+"""
+    _ttn_zigzag_internals(N_pad; bottom_up=true) -> Vector{Int}
+
+Boustrophedon order over internal nodes: alternate L→R / R→L by depth from root.
+"""
+function _ttn_zigzag_internals(N_pad::Int; bottom_up::Bool = true)
+    by_depth = Dict{Int, Vector{Int}}()
+    for h in 1:(N_pad - 1)
+        d = _ttn_internal_depth(h)
+        push!(get!(by_depth, d, Int[]), h)
+    end
+    depths = sort(collect(keys(by_depth)))
+    bottom_up && reverse!(depths)
+    order = Int[]
+    for (i, d) in enumerate(depths)
+        hs = sort(by_depth[d])
+        iseven(i) && reverse!(hs)
+        append!(order, hs)
+    end
+    return order
+end
+
+"""Build a sweep schedule of `(:leaf|:internal|:leaf_pair, id)` tasks."""
+function _ttn_sweep_tasks(
+    N_pad::Int, leaf_fwd::Vector{Int};
+    bottom_up::Bool = true,
+    dmrg_pairs::Bool = true,
+)
+    tasks = Tuple{Symbol, Int}[]
+    if dmrg_pairs
+        leaf_parents = Set(_ttn_leaf_parent_nodes(N_pad))
+        for h in _ttn_zigzag_internals(N_pad; bottom_up = bottom_up)
+            if h in leaf_parents
+                push!(tasks, (:leaf_pair, h))
+            else
+                push!(tasks, (:internal, h))
+            end
+        end
+    else
+        leaves = bottom_up ? leaf_fwd : reverse(leaf_fwd)
+        for j in leaves
+            push!(tasks, (:leaf, j))
+        end
+        for h in _ttn_zigzag_internals(N_pad; bottom_up = bottom_up)
+            push!(tasks, (:internal, h))
+        end
+    end
+    return tasks
+end
+
+# ─── Incremental environment refresh ─────────────────────────────────────────
+
+function _ttn_upward_one!(U::Vector{Matrix{Float64}},
+                          ttn::BinaryTTN{T},
+                          xi_data::AbstractMatrix{Int},
+                          h::Int) where T
+    N_d   = size(xi_data, 1)
+    N_pad = ttn.N_pad
+    if _ttn_is_leaf(h, N_pad)
+        j = _ttn_leaf_idx(h, N_pad)
+        if ttn.d_vec[j] == 1
+            U[h] = ones(Float64, N_d, 1)
+        else
+            A  = Float64.(ttn.leaves[j])
+            χ  = size(A, 2)
+            Uh = Matrix{Float64}(undef, N_d, χ)
+            @inbounds for i in 1:N_d
+                σ = xi_data[i, j]
+                @views Uh[i, :] .= A[σ, :]
+            end
+            U[h] = Uh
+        end
+    else
+        hl = 2h; hr = 2h + 1
+        Ul = U[hl]; Ur = U[hr]
+        χ_l = size(Ul, 2); χ_r = size(Ur, 2)
+        B   = Float64.(ttn.internals[h])
+        χ_u = size(B, 3)
+        KR  = reshape(reshape(Ul, N_d, χ_l, 1) .* reshape(Ur, N_d, 1, χ_r), N_d, χ_l * χ_r)
+        U[h] = KR * reshape(B, χ_l * χ_r, χ_u)
+    end
+    return nothing
+end
+
+function _ttn_upward_chain!(U::Vector{Matrix{Float64}},
+                            ttn::BinaryTTN{T},
+                            xi_data::AbstractMatrix{Int},
+                            h::Int) where T
+    while true
+        _ttn_upward_one!(U, ttn, xi_data, h)
+        h == 1 && break
+        h = _ttn_parent(h)
+    end
+    return nothing
+end
+
+function _ttn_downward_children!(E_down::Vector{Matrix{Float64}},
+                                 ttn::BinaryTTN{T},
+                                 U::Vector{Matrix{Float64}},
+                                 h::Int) where T
+    hl = 2h; hr = 2h + 1
+    B  = Float64.(ttn.internals[h])
+    χ_l, χ_r, χ_u = size(B)
+    Eh = E_down[h]
+    B_lr = reshape(permutedims(B, (1, 3, 2)), χ_l * χ_u, χ_r)
+    tmp_l = U[hr] * B_lr'
+    tmp_l3 = reshape(tmp_l, size(U[hr], 1), χ_l, χ_u)
+    E_down[hl] = dropdims(sum(tmp_l3 .* reshape(Eh, size(Eh, 1), 1, χ_u), dims = 3), dims = 3)
+    B_rr = reshape(permutedims(B, (2, 3, 1)), χ_r * χ_u, χ_l)
+    tmp_r = U[hl] * B_rr'
+    tmp_r3 = reshape(tmp_r, size(U[hl], 1), χ_r, χ_u)
+    E_down[hr] = dropdims(sum(tmp_r3 .* reshape(Eh, size(Eh, 1), 1, χ_u), dims = 3), dims = 3)
+    return nothing
+end
+
+function _ttn_downward_subtree!(E_down::Vector{Matrix{Float64}},
+                                ttn::BinaryTTN{T},
+                                U::Vector{Matrix{Float64}},
+                                h::Int) where T
+    N_pad = ttn.N_pad
+    h >= N_pad && return nothing
+    _ttn_downward_children!(E_down, ttn, U, h)
+    hl = 2h; hr = 2h + 1
+    !_ttn_is_leaf(hl, N_pad) && _ttn_downward_subtree!(E_down, ttn, U, hl)
+    !_ttn_is_leaf(hr, N_pad) && _ttn_downward_subtree!(E_down, ttn, U, hr)
+    return nothing
+end
+
+function _ttn_norm_up_internal!(M::Vector{Matrix{Float64}},
+                                ttn::BinaryTTN{T},
+                                h::Int) where T
+    hl = 2h; hr = 2h + 1
+    B    = Float64.(ttn.internals[h])
+    χ_l, χ_r, χ_u = size(B)
+    Ml   = M[hl]; Mr = M[hr]
+    Tc   = reshape(Ml * reshape(B, χ_l, χ_r * χ_u), χ_l, χ_r, χ_u)
+    Tp   = reshape(permutedims(Tc, (1, 3, 2)), χ_l * χ_u, χ_r)
+    S    = permutedims(reshape(Tp * Mr, χ_l, χ_u, χ_r), (1, 3, 2))
+    M[h] = reshape(S, χ_l * χ_r, χ_u)' * reshape(B, χ_l * χ_r, χ_u)
+    return nothing
+end
+
+function _ttn_norm_up_chain!(M::Vector{Matrix{Float64}},
+                             ttn::BinaryTTN{T},
+                             h::Int) where T
+    N_pad = ttn.N_pad
+    if _ttn_is_leaf(h, N_pad)
+        j = _ttn_leaf_idx(h, N_pad)
+        A = Float64.(ttn.leaves[j])
+        M[h] = A' * A
+    else
+        _ttn_norm_up_internal!(M, ttn, h)
+    end
+    while h > 1
+        h = _ttn_parent(h)
+        _ttn_norm_up_internal!(M, ttn, h)
+    end
+    return nothing
+end
+
+"""Post-order upward refresh of `U` on the subtree rooted at heap node `h`."""
+function _ttn_refresh_up_subtree!(U::Vector{Matrix{Float64}},
+                                    ttn::BinaryTTN{T},
+                                    xi_data::AbstractMatrix{Int},
+                                    h::Int) where T
+    N_pad = ttn.N_pad
+    if _ttn_is_leaf(h, N_pad)
+        _ttn_upward_one!(U, ttn, xi_data, h)
+    else
+        hl = 2h; hr = 2h + 1
+        _ttn_refresh_up_subtree!(U, ttn, xi_data, hl)
+        _ttn_refresh_up_subtree!(U, ttn, xi_data, hr)
+        _ttn_upward_one!(U, ttn, xi_data, h)
+    end
+    return nothing
+end
+
+"""Post-order refresh of `M_up` on the subtree rooted at heap node `h`."""
+function _ttn_norm_up_subtree!(M::Vector{Matrix{Float64}},
+                               ttn::BinaryTTN{T},
+                               h::Int) where T
+    N_pad = ttn.N_pad
+    if _ttn_is_leaf(h, N_pad)
+        j = _ttn_leaf_idx(h, N_pad)
+        A = Float64.(ttn.leaves[j])
+        M[h] = A' * A
+    else
+        hl = 2h; hr = 2h + 1
+        _ttn_norm_up_subtree!(M, ttn, hl)
+        _ttn_norm_up_subtree!(M, ttn, hr)
+        _ttn_norm_up_internal!(M, ttn, h)
+    end
+    return nothing
+end
+
+function _ttn_refresh_after_node!(
+    U::Vector{Matrix{Float64}},
+    E_down::Vector{Matrix{Float64}},
+    M_up::Vector{Matrix{Float64}},
+    ttn::BinaryTTN{T},
+    xi_data::AbstractMatrix{Int},
+    h::Int,
+) where T
+    N_pad = ttn.N_pad
+    if _ttn_is_leaf(h, N_pad)
+        _ttn_upward_chain!(U, ttn, xi_data, h)
+        _ttn_norm_up_chain!(M_up, ttn, h)
+    else
+        _ttn_refresh_up_subtree!(U, ttn, xi_data, h)
+        _ttn_norm_up_subtree!(M_up, ttn, h)
+        _ttn_downward_subtree!(E_down, ttn, U, h)
+        # ancestors above `h` may also need `M_up` if only subtree was refreshed
+        hp = _ttn_parent(h)
+        while hp >= 1
+            _ttn_norm_up_internal!(M_up, ttn, hp)
+            hp == 1 && break
+            hp = _ttn_parent(hp)
+        end
+    end
+    return U[1][:, 1]
+end
+
+# ─── DMRG-style leaf-pair update ─────────────────────────────────────────────
+
+function update_ttn_leaf_pair!(
+    ttn::BinaryTTN{T},
+    adam::Dict{Int, Any},
+    h::Int,
+    xi_data::AbstractMatrix{Int},
+    U::Vector{Matrix{Float64}},
+    E_down::Vector{Matrix{Float64}},
+    psi_all::Vector{Float64},
+    M_up::Vector{Matrix{Float64}},
+    η_t::Float64,
+    D_max::Int,
+    ε_cut::Real;
+    sweep::Symbol = :none,
+    bond_log = nothing,
+    epoch::Int = 0,
+    d_phys::Int = 0,
+) where T
+    N_pad = ttn.N_pad
+    hl = 2h; hr = 2h + 1
+
+    grad_B = _ttn_grad_node(ttn, xi_data, h,  U, E_down, psi_all, M_up)
+    grad_l = _ttn_grad_node(ttn, xi_data, hl, U, E_down, psi_all, M_up)
+    grad_r = _ttn_grad_node(ttn, xi_data, hr, U, E_down, psi_all, M_up)
+
+    _clip_ttn_grad!(grad_B); _clip_ttn_grad!(grad_l); _clip_ttn_grad!(grad_r)
+
+    _ttn_adam_internal!(ttn, adam, h, grad_B, η_t)
+    _ttn_adam_leaf!(ttn, adam, hl, grad_l, η_t)
+    _ttn_adam_leaf!(ttn, adam, hr, grad_r, η_t)
+
+    # Truncated SVD on the sibling bond inside B_h: (χ_l·χ_r) × χ_u
+    B = Float64.(ttn.internals[h])
+    χ_l, χ_r, χ_u = size(B)
+    d_phys == 0 && (d_phys = size(ttn.leaves[_ttn_leaf_idx(hl, N_pad)], 1))
+    Bm = reshape(B, χ_l * χ_r, χ_u)
+    keep_target = min(D_max, minimum(size(Bm)))
+    keep_target == 0 && return nothing
+    U_s, S, Vt = _truncated_svd(Bm, keep_target)
+    keep = length(S)
+    keep == 0 && return nothing
+    if ε_cut > 0
+        keep = max(1, min(sum(S .> Float64(ε_cut)), keep))
+        U_s = U_s[:, 1:keep]; S = S[1:keep]; Vt = Vt[1:keep, :]
+    end
+    if sweep === :forward
+        B_new = U_s[:, 1:keep] * Diagonal(S[1:keep]) * Vt[1:keep, :]
+    else
+        sqS = sqrt.(S[1:keep])
+        B_new = (U_s[:, 1:keep] .* sqS') * (sqS .* Vt[1:keep, :])
+    end
+    ttn.internals[h] = T.(reshape(B_new, χ_l, χ_r, keep))
+
+    if bond_log !== nothing
+        log_bond_spectrum!(bond_log, epoch, sweep, h, S, keep, d_phys)
+    end
+    return nothing
+end
+
+@inline function _clip_ttn_grad!(G::AbstractArray{<:Real}; maxnorm::Float64 = 10.0)
+    gnorm = norm(G)
+    if !isfinite(gnorm)
+        fill!(G, 0.0)
+    elseif gnorm > maxnorm
+        G .*= maxnorm / gnorm
+    end
+    return G
+end
+
+function _ttn_run_sweep!(
+    tasks::Vector{Tuple{Symbol, Int}},
+    ttn::BinaryTTN{T},
+    adam::Dict{Int, Any},
+    xi_data::AbstractMatrix{Int},
+    U::Vector{Matrix{Float64}},
+    E_down::Vector{Matrix{Float64}},
+    M_up::Vector{Matrix{Float64}},
+    η_t::Float64,
+    D_max::Int,
+    ε_cut::Real,
+    sweep::Symbol;
+    bond_log = nothing,
+    epoch::Int = 0,
+    d_phys::Int = 0,
+) where T
+    N_pad = ttn.N_pad
+    psi_all = U[1][:, 1]
+    refresh_h = 1
+    for (kind, id) in tasks
+        if kind === :leaf
+            h = _ttn_heap_of_leaf(id, N_pad)
+            grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
+            _ttn_adam_leaf!(ttn, adam, h, grad, η_t)
+            refresh_h = h
+        elseif kind === :internal
+            grad = _ttn_grad_node(ttn, xi_data, id, U, E_down, psi_all, M_up)
+            _ttn_adam_internal!(ttn, adam, id, grad, η_t)
+            refresh_h = id
+        elseif kind === :leaf_pair
+            update_ttn_leaf_pair!(
+                ttn, adam, id, xi_data, U, E_down, psi_all, M_up,
+                η_t, D_max, ε_cut;
+                sweep = sweep, bond_log = bond_log, epoch = epoch, d_phys = d_phys,
+            )
+            refresh_h = id
+        end
+        psi_all = _ttn_refresh_after_node!(U, E_down, M_up, ttn, xi_data, refresh_h)
+    end
+    return nothing
+end
+
 # ─── Training loop ───────────────────────────────────────────────────────────
 
 """
     train_ttn!(ttn, xi_data, n_epochs, η, D_max; kwargs...) -> nll_hist
 
-Train a `BinaryTTN` Born machine via node-by-node Adam gradient descent.
+Train a `BinaryTTN` Born machine.
 
-Each epoch performs:
+Default (`sweep_mode = :zigzag`, `dmrg_pairs = true`):
 1. Root-canonicalise.
-2. Batched upward + downward pass.
-3. Adam step on every node in bottom-up order (leaves → root).
-4. Second pass (top-down: root → leaves).
-5. NLL estimate.
+2. Zigzag bottom-up sweep with incremental environment refresh.
+3. Zigzag top-down sweep.
+4. NLL estimate.
+
+Use `sweep_mode = :legacy` for the original monotonic schedule with frozen
+environments within each half-epoch.
 
 # Keyword arguments (mirror `train_mps!`)
 - `verbose`, `nll_samples`   — logging.
 - `lr_schedule`              — `f(epoch, n_epochs, η) -> η_t`; `nothing` = constant.
 - `val_data`, `val_samples`, `patience`, `val_nll_log` — validation / early stopping.
 - `checkpoint_dir`, `checkpoint_every`                 — JLD2 checkpointing.
+- `sweep_mode`               — `:zigzag` (default) or `:legacy`.
+- `dmrg_pairs`               — DMRG pair updates at leaf-parent nodes (default `true`).
+- `ε_cut`                    — SVD truncation floor for leaf-pair updates (default `0`).
+- `bond_log`                 — optional bond-spectrum log (like `train_mps!`).
 """
 function train_ttn!(ttn       :: BinaryTTN{T},
                     xi_data   :: AbstractMatrix{Int},
@@ -603,26 +977,41 @@ function train_ttn!(ttn       :: BinaryTTN{T},
                     patience        :: Int    = typemax(Int),
                     val_nll_log                    = nothing,
                     checkpoint_dir                 = nothing,
-                    checkpoint_every               = nothing) where T
+                    checkpoint_every               = nothing,
+                    sweep_mode      ::Symbol = :zigzag,
+                    dmrg_pairs      ::Bool   = true,
+                    ε_cut           ::Real   = 0.0,
+                    bond_log                       = nothing) where T
 
     N_pad   = ttn.N_pad
-    adam    = Dict{Int, Any}()       # node → NamedTuple(m,v,t)
+    adam    = Dict{Int, Any}()
     nll_hist = Float64[]
 
     best_val = Inf; pat_count = 0; stop = false
 
     verbose && println("train_ttn!: n_sites=$(ttn.n_sites), N_pad=$(N_pad), " *
-                       "D_max=$(D_max), epochs=$n_epochs")
+                       "D_max=$(D_max), epochs=$n_epochs, sweep=$sweep_mode, " *
+                       "dmrg_pairs=$dmrg_pairs")
 
-    # Pre-allocate workspace arrays (reused every epoch)
     U      = Vector{Matrix{Float64}}(undef, 2N_pad)
     E_down = Vector{Matrix{Float64}}(undef, 2N_pad)
 
-    # Sweep orders
     leaf_fwd = [j for j in 1:N_pad if ttn.d_vec[j] > 1]
-    int_btup = collect((N_pad-1):-1:1)   # bottom-up internals (leaves' parents last = root)
-    int_tdn  = collect(1:(N_pad-1))      # top-down internals  (root first)
-    leaf_rev = reverse(leaf_fwd)
+    d_phys   = isempty(leaf_fwd) ? 1 : size(ttn.leaves[leaf_fwd[1]], 1)
+
+    use_zigzag = sweep_mode === :zigzag
+    tasks_bu = use_zigzag ?
+        _ttn_sweep_tasks(N_pad, leaf_fwd; bottom_up = true,  dmrg_pairs = dmrg_pairs) :
+        vcat(
+            [( :leaf, j) for j in leaf_fwd],
+            [( :internal, h) for h in collect((N_pad - 1):-1:1)],
+        )
+    tasks_td = use_zigzag ?
+        _ttn_sweep_tasks(N_pad, leaf_fwd; bottom_up = false, dmrg_pairs = dmrg_pairs) :
+        vcat(
+            [( :internal, h) for h in 1:(N_pad - 1)],
+            [( :leaf, j) for j in reverse(leaf_fwd)],
+        )
 
     for epoch in 1:n_epochs
         t0  = time()
@@ -631,40 +1020,52 @@ function train_ttn!(ttn       :: BinaryTTN{T},
         root_canonicalize_ttn!(ttn)
         _ttn_upward!(U, ttn, xi_data)
         _ttn_downward!(E_down, ttn, U)
-        psi_all = U[1][:, 1]              # amplitudes = root upward vec column
-
         M_up = _ttn_norm_up(ttn)
 
-        # ── Bottom-up sweep ─────────────────────────────────────────────────
-        for j in leaf_fwd
-            h    = _ttn_heap_of_leaf(j, N_pad)
-            grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
-            _ttn_adam_leaf!(ttn, adam, h, grad, η_t)
-        end
-        for h in int_btup
-            grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
-            _ttn_adam_internal!(ttn, adam, h, grad, η_t)
+        if use_zigzag
+            _ttn_run_sweep!(
+                tasks_bu, ttn, adam, xi_data, U, E_down, M_up,
+                η_t, D_max, ε_cut, :forward;
+                bond_log = bond_log, epoch = epoch, d_phys = d_phys,
+            )
+            root_canonicalize_ttn!(ttn)
+            _ttn_upward!(U, ttn, xi_data)
+            _ttn_downward!(E_down, ttn, U)
+            M_up = _ttn_norm_up(ttn)
+            _ttn_run_sweep!(
+                tasks_td, ttn, adam, xi_data, U, E_down, M_up,
+                η_t, D_max, ε_cut, :backward;
+                bond_log = bond_log, epoch = epoch, d_phys = d_phys,
+            )
+        else
+            psi_all = U[1][:, 1]
+            for (kind, id) in tasks_bu
+                if kind === :leaf
+                    h = _ttn_heap_of_leaf(id, N_pad)
+                    grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
+                    _ttn_adam_leaf!(ttn, adam, h, grad, η_t)
+                else
+                    grad = _ttn_grad_node(ttn, xi_data, id, U, E_down, psi_all, M_up)
+                    _ttn_adam_internal!(ttn, adam, id, grad, η_t)
+                end
+            end
+            root_canonicalize_ttn!(ttn)
+            _ttn_upward!(U, ttn, xi_data)
+            _ttn_downward!(E_down, ttn, U)
+            psi_all = U[1][:, 1]
+            M_up = _ttn_norm_up(ttn)
+            for (kind, id) in tasks_td
+                if kind === :leaf
+                    h = _ttn_heap_of_leaf(id, N_pad)
+                    grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
+                    _ttn_adam_leaf!(ttn, adam, h, grad, η_t)
+                else
+                    grad = _ttn_grad_node(ttn, xi_data, id, U, E_down, psi_all, M_up)
+                    _ttn_adam_internal!(ttn, adam, id, grad, η_t)
+                end
+            end
         end
 
-        # Re-canonicalise and refresh passes for top-down sweep
-        root_canonicalize_ttn!(ttn)
-        _ttn_upward!(U, ttn, xi_data)
-        _ttn_downward!(E_down, ttn, U)
-        psi_all = U[1][:, 1]
-        M_up    = _ttn_norm_up(ttn)
-
-        # ── Top-down sweep ──────────────────────────────────────────────────
-        for h in int_tdn
-            grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
-            _ttn_adam_internal!(ttn, adam, h, grad, η_t)
-        end
-        for j in leaf_rev
-            h    = _ttn_heap_of_leaf(j, N_pad)
-            grad = _ttn_grad_node(ttn, xi_data, h, U, E_down, psi_all, M_up)
-            _ttn_adam_leaf!(ttn, adam, h, grad, η_t)
-        end
-
-        # ── NLL estimate ────────────────────────────────────────────────────
         root_canonicalize_ttn!(ttn)
         nll = ttn_nll(ttn, xi_data; n_samples = nll_samples)
         push!(nll_hist, nll)
@@ -676,7 +1077,6 @@ function train_ttn!(ttn       :: BinaryTTN{T},
             _train_log_flush!()
         end
 
-        # ── Validation + early stopping ─────────────────────────────────────
         if val_data !== nothing
             val_nll = ttn_nll(ttn, val_data; n_samples = val_samples)
             val_nll_log !== nothing && push!(val_nll_log, val_nll)
@@ -694,7 +1094,6 @@ function train_ttn!(ttn       :: BinaryTTN{T},
         end
         stop && break
 
-        # ── Checkpoint ──────────────────────────────────────────────────────
         if checkpoint_dir !== nothing && checkpoint_every !== nothing &&
                 epoch % checkpoint_every == 0
             isdir(checkpoint_dir) || mkpath(checkpoint_dir)
@@ -880,6 +1279,153 @@ function _ttn_propagate_up!(ttn::BinaryTTN{T},
             break
         end
     end
+end
+
+# ─── Classification (label leaf) ─────────────────────────────────────────────
+
+"""
+    class_probabilities_ttn(ttn, xi_path, n_classes) -> Vector{Float64}
+
+Born-rule class probabilities `p(y=c | xi_path)` for a fixed encoded path
+(length `ttn.n_sites - 1`).
+"""
+function class_probabilities_ttn(
+    ttn::BinaryTTN{T},
+    xi_path::AbstractVector{<:Integer},
+    n_classes::Int,
+) where {T<:Real}
+    @assert length(xi_path) == ttn.n_sites - 1
+    amps = Vector{Float64}(undef, n_classes)
+    @inbounds for c in 1:n_classes
+        x = vcat(collect(Int, xi_path), c)
+        amps[c] = abs2(Float64(ttn_amplitude(ttn, x)))
+    end
+    s = sum(amps)
+    if !(s > 0) || !isfinite(s)
+        return fill(1.0 / n_classes, n_classes)
+    end
+    return amps ./ s
+end
+
+"""Argmax of `class_probabilities_ttn` (1-based class index)."""
+function predict_class_ttn(
+    ttn::BinaryTTN{T},
+    xi_path::AbstractVector{<:Integer},
+    n_classes::Int,
+) where {T<:Real}
+    return argmax(class_probabilities_ttn(ttn, xi_path, n_classes))
+end
+
+"""Fraction of correctly classified rows in `xi_data` (label in last column)."""
+function classification_accuracy_ttn(
+    ttn::BinaryTTN{T},
+    xi_data::AbstractMatrix{<:Integer},
+    n_classes::Int,
+) where {T<:Real}
+    Nd = size(xi_data, 1)
+    correct = Threads.Atomic{Int}(0)
+    Threads.@threads for i in 1:Nd
+        xi_row = xi_data[i, :]
+        y_true = Int(xi_row[end])
+        y_pred = predict_class_ttn(ttn, xi_row[1:(end - 1)], n_classes)
+        y_pred == y_true && Threads.atomic_add!(correct, 1)
+    end
+    return correct[] / Nd
+end
+
+# ─── Tree entanglement diagnostics ───────────────────────────────────────────
+
+function _vn_entropy_from_sv(s::AbstractVector{<:Real})
+    z = sum(abs2, s)
+    if !(isfinite(z)) || z <= 0
+        return 0.0
+    end
+    return sum(-(p/z) * log(p/z) for p in abs2.(s) if p/z > 1e-30)
+end
+
+"""
+    ttn_subtree_leaves(ttn, h) -> Vector{Int}
+
+Physical leaf indices (1-based time steps) in the subtree rooted at heap node `h`.
+"""
+function ttn_subtree_leaves(ttn::BinaryTTN, h::Int)::Vector{Int}
+    N_pad = ttn.N_pad
+    if _ttn_is_leaf(h, N_pad)
+        j = _ttn_leaf_idx(h, N_pad)
+        return (j <= ttn.n_sites && ttn.d_vec[j] > 1) ? [j] : Int[]
+    end
+    return vcat(ttn_subtree_leaves(ttn, 2h), ttn_subtree_leaves(ttn, 2h + 1))
+end
+
+"""
+    TTNInternalCut
+
+Von Neumann entropies at one internal heap node of a root-canonical `BinaryTTN`.
+"""
+struct TTNInternalCut
+    h            :: Int
+    depth        :: Int
+    χ_l          :: Int
+    χ_r          :: Int
+    χ_u          :: Int
+    leaves_left  :: Vector{Int}
+    leaves_right :: Vector{Int}
+    S_lr         :: Float64
+    S_up         :: Float64
+    sv_lr        :: Vector{Float64}
+    sv_up        :: Vector{Float64}
+end
+
+"""
+    ttn_internal_cuts(ttn) -> Vector{TTNInternalCut}
+
+Von Neumann entropies (nats) at every internal node of a root-canonical `BinaryTTN`.
+
+* `S_lr` — entanglement across the **left | right** child bonds at `B_h`.
+* `S_up` — entanglement across the **(left ⊗ right) | parent** cut (`χ_u` bond).
+
+`leaves_left` / `leaves_right` are physical site indices in each subtree (tree
+grouping, not necessarily contiguous in calendar time).
+"""
+function ttn_internal_cuts(ttn::BinaryTTN{T}) where {T<:Real}
+    root_canonicalize_ttn!(ttn)
+    N_pad = ttn.N_pad
+    cuts  = TTNInternalCut[]
+    for h in 1:(N_pad - 1)
+        B = Float64.(ttn.internals[h])
+        χ_l, χ_r, χ_u = size(B)
+        sv_lr = collect(svd(reshape(B, χ_l, χ_r * χ_u); full = false).S)
+        sv_up = collect(svd(reshape(B, χ_l * χ_r, χ_u); full = false).S)
+        push!(cuts, TTNInternalCut(
+            h, h == 1 ? 0 : Int(floor(log2(h))),
+            χ_l, χ_r, χ_u,
+            ttn_subtree_leaves(ttn, 2h),
+            ttn_subtree_leaves(ttn, 2h + 1),
+            _vn_entropy_from_sv(sv_lr), _vn_entropy_from_sv(sv_up),
+            sv_lr, sv_up,
+        ))
+    end
+    return cuts
+end
+
+"""
+    ttn_layer_entropy_summary(cuts) -> (depths, mean_S_lr, mean_S_up, n_nodes)
+
+Mean `S_lr` and `S_up` over internal nodes at each tree depth.
+"""
+function ttn_layer_entropy_summary(cuts::AbstractVector{TTNInternalCut})
+    depths = sort(unique(c.depth for c in cuts))
+    mean_lr = Float64[]
+    mean_up = Float64[]
+    counts  = Int[]
+    for d in depths
+        grp = [c for c in cuts if c.depth == d]
+        n = length(grp)
+        push!(mean_lr, sum(c.S_lr for c in grp) / n)
+        push!(mean_up, sum(c.S_up for c in grp) / n)
+        push!(counts, length(grp))
+    end
+    return depths, mean_lr, mean_up, counts
 end
 
 # Return upward bond dimension for heap node h.
