@@ -1,3 +1,10 @@
 /notebooks/experiments/checkpoints/
+/notebooks/experiments/_bench_cache/
+/results/
+.venv/
+__pycache__/
+*.pyc
+*.npz
 *.jld2
 Manifest.toml
+.DS_Store
