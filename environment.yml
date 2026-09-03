@@ -1,0 +1,29 @@
+# Conda environment for the Python experiment notebooks in
+# notebooks/experiments/ (e.g. diffusion_qaoa_params.ipynb, mera_maxcut_qiskit.ipynb).
+#
+# Create:   conda env create -f environment.yml
+# Activate: conda activate mpsfast
+# Register a Jupyter kernel (optional):
+#           python -m ipykernel install --user --name mpsfast --display-name "Python (mpsfast)"
+#
+# Versions pinned to what the notebooks were verified against (Python 3.12).
+name: mpsfast
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  # scientific stack
+  - numpy>=2.2
+  - scipy>=1.16
+  - networkx>=3.6
+  - matplotlib>=3.10
+  # notebook tooling
+  - jupyterlab
+  - ipykernel
+  - nbconvert
+  - pip
+  # installed via pip (more reliable than conda-forge for these)
+  - pip:
+      - torch>=2.4
+      - qiskit>=2.1
+      - qiskit-aer>=0.17

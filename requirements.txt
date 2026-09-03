@@ -1,0 +1,28 @@
+# Python dependencies for the experiment notebooks in notebooks/experiments/
+# (e.g. diffusion_qaoa_params.ipynb, mera_maxcut_qiskit.ipynb).
+#
+# Use this instead of environment.yml if the public conda channels are blocked
+# on the corporate network (Zscaler / Nexus setup). pip + PyPI works here.
+#
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#   python -m ipykernel install --user --name mpsfast --display-name "Python (mpsfast)"
+#
+# Verified against Python 3.12.
+
+# scientific stack
+numpy>=2.2
+scipy>=1.16
+networkx>=3.6
+matplotlib>=3.10
+
+# quantum + ML
+torch>=2.4
+qiskit>=2.1
+qiskit-aer>=0.17
+
+# notebook tooling
+jupyterlab
+ipykernel
+nbconvert
