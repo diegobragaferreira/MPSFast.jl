@@ -57,6 +57,7 @@ include("qubo.jl")
 include("qubo_opt.jl")
 include("portfolio_loop.jl")
 include("ttn.jl")
+include("dmrg.jl")
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 export mps_amplitude
@@ -150,5 +151,8 @@ export path_log_returns, train_factor_mps, mps_factor_return_scenarios
 export generative_portfolio_qubo_loop, equal_weight_portfolio_stats
 export compare_generative_portfolio_sources, simulate_random_walk_prices
 export demo_generative_portfolio_loop
+
+# ── Generic MPO DMRG ──────────────────────────────────────────────────────────
+export dmrg_ground_state, dmrg_excited_state, dmrg_residual, dmrg_energy
 
 end # module MPSFast
