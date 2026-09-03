@@ -653,14 +653,36 @@ function update_pair!(
     Lv_carry = nothing, bond_log = nothing,
     epoch::Int = 0, sweep::Symbol = :none,
     d_phys::Int = size(mps[j], 2),
+    u1_layout::Union{Nothing, U1LabelLayout} = nothing,
+    u1_spec_proj::U1Spec = NoSymmetry,
+    u1_chain::Union{Nothing, U1ChainLayout} = nothing,
+    u1_proj_strength::Real = 1.0,
 ) where {T<:Real}
     Dl = size(mps[j],   1)
     d  = size(mps[j],   2)
     d2 = size(mps[j+1], 2)
     Dr = size(mps[j+1], 3)
+    Ml = length(mps)
 
     grad, B, _Z, _Lv, _Rv, _ψ =
         nll_gradient!(ws, mps, xi_data, j, Lenv, Renv; Lv_carry = Lv_carry)
+
+    if u1_layout !== nothing && symmetry_active(u1_spec_proj)
+        ps = Float64(u1_proj_strength)
+        if u1_chain !== nothing
+            project_u1_path_bond!(
+                grad, u1_spec_proj, u1_chain, j, Ml, Dl, d, d2, Dr;
+                label_layout = u1_layout, strength = ps)
+            project_u1_path_bond!(
+                B, u1_spec_proj, u1_chain, j, Ml, Dl, d, d2, Dr;
+                label_layout = u1_layout, strength = ps)
+        else
+            project_u1_merged_bond!(
+                grad, u1_spec_proj, u1_layout, j, Ml, Dl, d, d2, Dr; strength = ps)
+            project_u1_merged_bond!(
+                B, u1_spec_proj, u1_layout, j, Ml, Dl, d, d2, Dr; strength = ps)
+        end
+    end
 
     # ── Gradient clipping ─────────────────────────────────────────────────────
     # With Float32 and large D_max the partition function Z can underflow, making
@@ -858,6 +880,19 @@ Each epoch performs:
                       with no improvement in validation NLL. Ignored when
                       `val_data === nothing`.
 - `val_nll_log`     — pre-allocated `Vector` appended with per-epoch val NLL.
+- `u1_spec`         — `U1Spec` for U(1) flux masking (`NoSymmetry` = dense baseline).
+- `u1_conservation` — `:none`, `:hard` (zero forbidden blocks), `:soft`, or
+                      `:soft_then_hard` (see `u1_soft_epochs`).
+- `u1_soft_strength`— for `:soft`, scale forbidden blocks by `(1 - strength)`.
+- `u1_soft_epochs`  — with `:soft_then_hard`, epochs `1:u1_soft_epochs` use `:soft`.
+- `n_classes`       — label outcomes (inferred from last MPS site if `0`).
+- `d_path`          — path site dimension (inferred from site 1 if `0`).
+- `u1_block_mode`   — Phase 1: symmetry-preserving gradient projection on the label
+                      bond (`sites=:label_only` specs). Skips epoch-end masking.
+- `u1_path_block_mode` — Phase 2: project every bond via `U1ChainLayout` (experimental).
+- `epoch_callback`  — `f(mps, epoch, stats)` called once per epoch after NLL (and
+                      validation, if any). `stats` is a `NamedTuple` with fields
+                      `train_nll`, `val_nll` (`nothing` if no `val_data`), and `η`.
 """
 function train_mps!(
     mps::Vector{Array{T,3}}, xi_data, n_epochs, η, D_max, ε_cut;
@@ -876,10 +911,32 @@ function train_mps!(
     val_samples::Int                            = 2_000,
     patience::Int                               = typemax(Int),
     val_nll_log                                 = nothing,
+    u1_spec::U1Spec                              = NoSymmetry,
+    u1_conservation::Symbol                      = :none,
+    u1_soft_strength::Real                       = 0.9,
+    u1_soft_epochs::Int                          = 10,
+    n_classes::Int                               = 0,
+    d_path::Int                                  = 0,
+    u1_block_mode::Bool                          = false,
+    u1_path_block_mode::Bool                     = false,
+    su2_spec::SU2Spec                            = NoSU2Symmetry,
+    su2_conservation::Symbol                     = :none,
+    su2_soft_strength::Real                      = 0.9,
+    epoch_callback::Union{Nothing, Function}     = nothing,
 ) where {T<:Real}
     Ml     = length(mps)
     Nd     = size(xi_data, 1)
     d_loc  = size(mps[1], 2)
+    n_classes <= 0 && (n_classes = size(mps[Ml], 2))
+    d_path <= 0 && (d_path = d_loc)
+    use_block = u1_use_block_mode(u1_spec, u1_block_mode)
+    use_path_block = u1_use_path_block_mode(u1_spec, u1_path_block_mode)
+    u1_layout = (use_block || use_path_block) ?
+        build_u1_label_layout(u1_spec, mps, n_classes, d_path) : nothing
+    u1_chain = use_path_block ?
+        build_u1_chain_layout(u1_spec, mps, n_classes, d_path) : nothing
+    soft_epochs_eff = u1_conservation == :soft_then_hard ?
+        max(u1_soft_epochs, 1) : u1_soft_epochs
     _validate_training_inputs!(mps, xi_data; feature_phi = feature_phi, D_max = D_max)
     nll_hist   = Float64[]
     adam_state = AdamDict{T}()
@@ -924,6 +981,11 @@ function train_mps!(
 
     for epoch in 1:n_epochs
         t_epoch = time()
+        use_block && (u1_layout = build_u1_label_layout(u1_spec, mps, n_classes, d_path))
+        use_path_block && (u1_chain = build_u1_chain_layout(u1_spec, mps, n_classes, d_path))
+        eff_cons = u1_conservation_at_epoch(u1_conservation, epoch, soft_epochs_eff)
+        proj_strength = eff_cons == :soft ? Float64(u1_soft_strength) :
+            (eff_cons == :hard ? 1.0 : 0.0)
         verbose && (println("— Epoch ", epoch, "/", n_epochs, " —"); _train_log_flush!())
 
         # Per-epoch learning rate (cosine annealing or constant)
@@ -950,7 +1012,12 @@ function train_mps!(
             bond_progress && verbose && (println("  · forward bond ", j, "/", Ml - 1); _train_log_flush!())
             update_pair!(ws, mps, xi_data, j, η_t, D_max, ε_cut, Lenv, Renv, adam_state;
                          Lv_carry = Lv, bond_log = bond_log,
-                         epoch = epoch, sweep = :forward, d_phys = d_loc)
+                         epoch = epoch, sweep = :forward, d_phys = d_loc,
+                         u1_layout = u1_layout, u1_spec_proj = u1_spec,
+                         u1_chain = u1_chain, u1_proj_strength = proj_strength)
+            (use_block || use_path_block) || _apply_u1_if_needed!(
+                mps, u1_spec, eff_cons, u1_soft_strength, n_classes, d_path;
+                per_bond = u1_mask_per_bond(u1_spec, eff_cons))
             _refresh_norm_envs_after_bond_train!(mps, Lenv, Renv, j, ws)
             Lv = extend_lv_after_bond!(ws, mps, xi_data, j, Lv)
         end
@@ -984,13 +1051,30 @@ function train_mps!(
             bond_progress && verbose && (println("  · backward bond ", j, "/", Ml - 1); _train_log_flush!())
             update_pair!(ws, mps, xi_data, j, η_t, D_max, ε_cut, Lenv, Renv, adam_state;
                          Lv_carry = lv_cache[j], bond_log = bond_log,
-                         epoch = epoch, sweep = :backward, d_phys = d_loc)
+                         epoch = epoch, sweep = :backward, d_phys = d_loc,
+                         u1_layout = u1_layout, u1_spec_proj = u1_spec,
+                         u1_chain = u1_chain, u1_proj_strength = proj_strength)
+            (use_block || use_path_block) || _apply_u1_if_needed!(
+                mps, u1_spec, eff_cons, u1_soft_strength, n_classes, d_path;
+                per_bond = u1_mask_per_bond(u1_spec, eff_cons))
             _refresh_norm_envs_after_bond_train!(mps, Lenv, Renv, j, ws)
         end
 
         verbose && (println("  ↳ backward done → canonicalize + NLL estimate …"); _train_log_flush!())
 
         left_canonicalize_mps!(mps)
+        if use_block || use_path_block
+            u1_layout = build_u1_label_layout(u1_spec, mps, n_classes, d_path)
+            project_u1_label_site!(mps[Ml], u1_layout; strength = proj_strength)
+            safeguard_u1_label_norm!(mps, u1_layout)
+        else
+            _apply_u1_epoch_end!(mps, u1_spec, eff_cons, u1_soft_strength, n_classes, d_path)
+        end
+        if su2_active(su2_spec) && su2_conservation != :none
+            eff_su2 = u1_conservation_at_epoch(su2_conservation, epoch, soft_epochs_eff)
+            _apply_su2_epoch_end!(
+                mps, su2_spec, eff_su2, su2_soft_strength, n_classes, d_path)
+        end
         Le, _ = _norm_envs_for_train(mps, ws)
         Z_est = Float64(Le[Ml+1][1, 1])
         logZ  = log(max(Z_est, 1e-30))
@@ -1011,6 +1095,7 @@ function train_mps!(
         end
 
         # ── Validation NLL + early stopping ───────────────────────────────────
+        val_nll_this = nothing
         if val_data !== nothing
             Nv   = size(val_data, 1)
             vidx = randperm(Nv)[1:min(val_samples, Nv)]
@@ -1021,6 +1106,7 @@ function train_mps!(
                 Threads.atomic_add!(val_atomic, logZ - 2.0 * log(max(abs(Float64(p)), 1e-30)))
             end
             val_nll = val_atomic[] / length(vidx)
+            val_nll_this = val_nll
             val_nll_log !== nothing && push!(val_nll_log, val_nll)
             verbose && (println("  ↳ val NLL ≈ $(round(val_nll; digits=4))  (patience $patience_counter/$patience)"); _train_log_flush!())
 
@@ -1037,6 +1123,9 @@ function train_mps!(
             end
         end
 
+        epoch_callback !== nothing && epoch_callback(mps, epoch, (;
+            train_nll = nll, val_nll = val_nll_this, η = η_t))
+
         do_checkpoint(epoch)
         stop_early && break
     end
@@ -1048,4 +1137,63 @@ function train_mps!(
         verbose && (println("→ final model: ", fn); _train_log_flush!())
     end
     return nll_hist
+end
+
+"""
+    u1_training_step_audit(mps, xi_data, spec, j; ...)
+
+Run one `update_pair!` on a **copy** of `mps` and measure U(1) leakage:
+
+* `after_update_ratio` — forbidden mass fraction after Adam+SVD (symmetry broken here).
+* `after_mask_ratio` — after applying the same mask as training (`:hard` / `:soft`).
+* `residual_ok` — `u1_symmetry_residual` after masking.
+
+Use to verify that masking restores symmetry and that SVD/Adam introduce leakage
+only in forbidden blocks.
+"""
+function u1_training_step_audit(
+    mps0::Vector{Array{T,3}},
+    xi_data,
+    spec::U1Spec,
+    j::Int;
+    η::Real,
+    D_max::Int,
+    ε_cut::Real = 1e-5,
+    conservation::Symbol = :hard,
+    strength::Real = 1.0,
+    n_classes::Int = 2,
+    d_path::Int = 0,
+    sweep::Symbol = :forward,
+) where {T<:Real}
+    mps = deepcopy(mps0)
+    Nd = size(xi_data, 1)
+    d_loc = size(mps[1], 2)
+    d_path > 0 || (d_path = d_loc)
+    ws = TrainWorkspace(T, Nd, d_loc, D_max)
+    _ensure_bins!(ws, xi_data)
+    right_canonicalize_mps!(mps)
+    Lenv, Renv = _canonical_envs_identity(mps)
+    Lv = ones(T, Nd, 1)
+    for k in 1:(j - 1)
+        Lv = extend_lv_after_bond!(ws, mps, xi_data, k, Lv)
+    end
+    adam = AdamDict{T}()
+    _, _, before_ratio = u1_forbidden_mass(mps, spec; n_classes = n_classes, d_path = d_path)
+    update_pair!(ws, mps, xi_data, j, T(η), D_max, T(ε_cut), Lenv, Renv, adam;
+                 Lv_carry = Lv, epoch = 1, sweep = sweep, d_phys = d_loc)
+    _, _, after_update_ratio = u1_forbidden_mass(mps, spec; n_classes = n_classes, d_path = d_path)
+    after_update_max = u1_max_forbidden_entry(mps, spec; n_classes = n_classes, d_path = d_path)
+    apply_u1_conservation!(mps, spec; mode = conservation, strength = strength,
+                           n_classes = n_classes, d_path = d_path)
+    _, _, after_mask_ratio = u1_forbidden_mass(mps, spec; n_classes = n_classes, d_path = d_path)
+    atol = conservation === :hard ? 1e-5 : max(1e-3, strength * 1e-2)
+    residual_ok = u1_symmetry_residual(mps, spec; n_classes = n_classes, d_path = d_path, atol = atol)
+    return (;
+        bond = j, sweep,
+        before_ratio,
+        after_update_ratio,
+        after_update_max,
+        after_mask_ratio,
+        residual_ok,
+    )
 end

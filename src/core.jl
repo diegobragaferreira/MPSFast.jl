@@ -35,6 +35,24 @@ function init_mps(
     return mps
 end
 
+"""
+    init_mps_classification(Ml, d_path, n_classes, D_max; kwargs...) -> mps
+
+Joint classification MPS: sites `1:Ml-1` have physical dim `d_path`, last site
+has `n_classes` (label).  Left-growing bonds `min(d_path^j, D_max)`.
+"""
+function init_mps_classification(
+    Ml::Int, d_path::Int, n_classes::Int, D_max::Int;
+    T::Type{<:Real} = Float32,
+    rng::AbstractRNG = Random.default_rng(),
+)
+    Ds = [1; [min(d_path^j, D_max) for j in 1:Ml-1]; 1]
+    mps = [randn(rng, T, Ds[j], d_path, Ds[j+1]) for j in 1:Ml-1]
+    push!(mps, randn(rng, T, Ds[Ml], n_classes, 1))
+    left_canonicalize_mps!(mps)
+    return mps
+end
+
 # ─── Amplitude ───────────────────────────────────────────────────────────────
 
 """
@@ -506,8 +524,8 @@ function _validate_training_inputs!(
     # matrix must cover every site).  For one-hot / classification MPS the last
     # (label) site may have a different physical dim, so only check when needed.
     if feature_phi !== nothing
-        @inbounds for j in 2:Ml
-            @assert size(mps[j], 2) == d "Physical dim mismatch at site $j."
+        @inbounds for j in 1:(Ml - 1)
+            @assert size(mps[j], 2) == d "Physical dim mismatch at path site $j."
         end
     end
     mxi, mx = extrema(xi_data)

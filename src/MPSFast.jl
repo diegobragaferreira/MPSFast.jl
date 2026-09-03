@@ -43,6 +43,10 @@ using Base.Threads
 using TSVD
 
 include("core.jl")
+include("symmetry.jl")
+include("su2_symmetry.jl")
+include("u1_block_sparse.jl")
+include("u1_path_block.jl")
 include("training.jl")
 include("sampling.jl")
 include("analysis.jl")
@@ -59,8 +63,39 @@ export norm_environments
 export refresh_norm_envs_after_bond!
 export class_probabilities, predict_class, classification_accuracy
 export init_mps
+export init_mps_classification
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# ── U(1) symmetry (Phase 0: dense masking; Phase 1: block-sparse label) ───────
+export SymmetryMode, U1Spec, NoSymmetry, symmetry_active
+export u1_label_spec, u1_path_centered_spec, u1_path_data_matched_spec, u1_path_empirical_spec
+export u1_path_empirical_from_probe, u1_path_sign_increment_spec, u1_path_upcount_spec
+export apply_u1_conservation!, randomize_u1_allowed!, init_mps_classification_u1
+export path_total_charge, flux_compatible, sector_compatibility_rate, flux_nearest_class
+export flux_exact_class, bounded_q_label, empirical_q_labels, path_charges, empirical_path_charge_range
+export mean_path_charge_by_class, u1_allowed_fraction, u1_mask_per_bond
+export u1_forbidden_mass, u1_max_forbidden_entry, u1_symmetry_residual
+export u1_training_step_audit
+# ── SU(2) symmetry (TrigEncoder feature legs) ───────────────────────────────────
+export SU2Mode, SU2Spec, NoSU2Symmetry, su2_active
+export trig_feature_mz_charge, trig_feature_j_quantum
+export su2_trig_feature_spec, su2_trig_bucket_path_spec, su2_as_u1_bucket_spec
+export apply_su2_conservation!, randomize_su2_allowed!, init_mps_classification_su2
+export su2_allowed_fraction, su2_symmetry_residual, trig_phi_weighted_charge
+export su2_trig_empirical_bucket_spec, su2_bucket_compat
+export su2_mask_per_bond
+# ── U(1) Phase 1: block-sparse label site ─────────────────────────────────────
+export U1LabelLayout, U1BlockLabel
+export sector_aligned_bond_charges, label_interface_charges, build_u1_label_layout, allowed_label_pairs
+export extract_u1_block_label, materialize_u1_label!, sync_u1_block_label!
+export project_u1_label_site!, project_u1_merged_bond!, init_mps_classification_u1_block
+export u1_block_label_stats, u1_block_forbidden_mass, u1_block_symmetry_residual
+export mps_amplitude_u1_block, u1_block_training_step_audit, u1_use_block_mode
+export safeguard_u1_label_norm!
+export U1TrainingPlan, u1_training_plan
+export u1_conservation_at_epoch, u1_data_compatible, site_bond_charges
+# ── U(1) Phase 2: full-chain block layout (experimental) ───────────────────────
+export U1ChainLayout, build_u1_chain_layout, project_u1_path_bond!
+export u1_path_bond_allowed_fraction, u1_use_path_block_mode
 export TrainWorkspace
 export train_mps!, cosine_lr
 export nll_gradient!

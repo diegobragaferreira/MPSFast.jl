@@ -37,6 +37,7 @@ import ..sample_paths_feature_map
 
 export PathEncoder
 export BasisEncoder, BinaryEncoder, TrigEncoder
+export SignIncrementEncoder, UpDownIncrementEncoder
 export chain_length, site_dim, encode_paths, decode_paths, fit_grid!, feature_map
 export sample_paths
 export encode_labeled_paths, classification_chain_length, label_site_dim
@@ -390,6 +391,92 @@ function encode_labeled_paths(
         xi[i, Ml_path + 1] = y
     end
     return xi
+end
+
+# ─── SignIncrementEncoder ─────────────────────────────────────────────────────
+
+"""
+    SignIncrementEncoder(; ε = 1e-8)
+
+Label-agnostic encoder: one MPS site per timestep, `d = 3`.
+
+* `σ = 1` — negative increment (down)
+* `σ = 2` — flat (`|Δ| ≤ ε`)
+* `σ = 3` — positive increment (up)
+
+First site uses `sign(path[t₁])`; later sites use `sign(path[t] - path[t-1])`.
+Pairs with `u1_path_sign_increment_spec` (`Q` = net up-minus-down count).
+"""
+mutable struct SignIncrementEncoder <: PathEncoder
+    ε::Float64
+end
+
+SignIncrementEncoder(; ε::Real = 1e-8) = SignIncrementEncoder(Float64(ε))
+
+chain_length(::SignIncrementEncoder, M::Int) = M
+site_dim(::SignIncrementEncoder) = 3
+fit_grid!(::SignIncrementEncoder, ::AbstractMatrix) = nothing
+
+@inline function _sign_increment_index(Δ::Real, ε::Float64)
+    Δ > ε && return 3
+    Δ < -ε && return 1
+    return 2
+end
+
+function encode_paths(enc::SignIncrementEncoder, paths::AbstractMatrix)
+    N, M = size(paths)
+    xi = Matrix{Int}(undef, N, M)
+    @inbounds for i in 1:N
+        xi[i, 1] = _sign_increment_index(paths[i, 1], enc.ε)
+        for t in 2:M
+            Δ = paths[i, t] - paths[i, t - 1]
+            xi[i, t] = _sign_increment_index(Δ, enc.ε)
+        end
+    end
+    return xi
+end
+
+function decode_paths(::SignIncrementEncoder, ::AbstractMatrix)
+    error("SignIncrementEncoder: decode_paths not defined (diagnostic encoder)")
+end
+
+# ─── UpDownIncrementEncoder ───────────────────────────────────────────────────
+
+"""
+    UpDownIncrementEncoder(; ε = 1e-8)
+
+Binary increment encoder: `d = 2`, `σ = 1` (down/flat) or `σ = 2` (up).
+`Q(x)` under `u1_path_upcount_spec` counts up-moves.
+"""
+mutable struct UpDownIncrementEncoder <: PathEncoder
+    ε::Float64
+end
+
+UpDownIncrementEncoder(; ε::Real = 1e-8) = UpDownIncrementEncoder(Float64(ε))
+
+chain_length(::UpDownIncrementEncoder, M::Int) = M
+site_dim(::UpDownIncrementEncoder) = 2
+fit_grid!(::UpDownIncrementEncoder, ::AbstractMatrix) = nothing
+
+@inline function _updown_index(Δ::Real, ε::Float64)
+    return Δ > ε ? 2 : 1
+end
+
+function encode_paths(enc::UpDownIncrementEncoder, paths::AbstractMatrix)
+    N, M = size(paths)
+    xi = Matrix{Int}(undef, N, M)
+    @inbounds for i in 1:N
+        xi[i, 1] = _updown_index(paths[i, 1], enc.ε)
+        for t in 2:M
+            Δ = paths[i, t] - paths[i, t - 1]
+            xi[i, t] = _updown_index(Δ, enc.ε)
+        end
+    end
+    return xi
+end
+
+function decode_paths(::UpDownIncrementEncoder, ::AbstractMatrix)
+    error("UpDownIncrementEncoder: decode_paths not defined (diagnostic encoder)")
 end
 
 # ─── Utility ──────────────────────────────────────────────────────────────────
