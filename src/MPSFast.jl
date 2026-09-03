@@ -57,6 +57,7 @@ include("qubo.jl")
 include("qubo_opt.jl")
 include("portfolio_loop.jl")
 include("ttn.jl")
+include("market_making.jl")
 include("dmrg.jl")
 
 # ── Core ──────────────────────────────────────────────────────────────────────
@@ -152,7 +153,13 @@ export generative_portfolio_qubo_loop, equal_weight_portfolio_stats
 export compare_generative_portfolio_sources, simulate_random_walk_prices
 export demo_generative_portfolio_loop
 
-# ── Generic MPO DMRG ──────────────────────────────────────────────────────────
+# ── Market making (Coutinho report) ───────────────────────────────────────────
+export MarketMakingModel, c_coeff, site_dims, hilbert_dim
+export config_to_index, index_to_config
+export build_hamiltonian_sparse, build_mpo_cores, mpo_to_dense
+export exact_ground_states, tt_svd, mps_to_lex_vector, lex_vector_to_tensor
+export bipartite_entropies_exact, central_grid_edges, quote_log_ratio_errors
+export align_and_normalize
 export dmrg_ground_state, dmrg_excited_state, dmrg_residual, dmrg_energy
 
 end # module MPSFast

@@ -55,6 +55,11 @@ src/
   analysis.jl     — bipartite entropies, bond-spectrum logging
   io.jl           — JLD2 checkpointing (save / load bundles)
   Encoders.jl     — path encoders submodule (Basis / Binary / Trig)
+  market_making.jl — ground-state TN formulation of multi-asset market making
+                      (exact Hamiltonian, K+2 MPO, TT-SVD, quote-ratio metrics)
+  dmrg.jl         — genuine two-site (+ excited-state) DMRG for an MPO Hamiltonian:
+                      MPO environments, matrix-free Lanczos local eigensolve, SVD
+                      truncation; never forms the full state vector
 
 test/
   runtests.jl     — unit and smoke tests
