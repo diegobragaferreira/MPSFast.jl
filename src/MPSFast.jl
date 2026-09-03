@@ -5,7 +5,8 @@ Fast MPS and TTN Born-machine training for discrete path distributions.
 
 Provides DMRG-style BLAS-batched training, truncated-SVD bond updates,
 in-place Adam optimiser, sequential conditional sampling, bipartite
-entropies, and JLD2 checkpointing.
+entropies, JLD2 checkpointing, and **QUBO / Ising combinatorial solvers**
+(see `qubo.jl`, `qubo_opt.jl`).
 
 Also provides a Binary Tree Tensor Network (BTT) Born machine (`BinaryTTN`)
 with analogous training (`train_ttn!`) and sampling (`sample_ttn`).
@@ -52,6 +53,8 @@ include("sampling.jl")
 include("analysis.jl")
 include("io.jl")
 include("Encoders.jl")
+include("qubo.jl")
+include("qubo_opt.jl")
 include("ttn.jl")
 
 # ── Core ──────────────────────────────────────────────────────────────────────
@@ -128,5 +131,16 @@ export sample_ttn
 export init_ttn_classification
 export class_probabilities_ttn, predict_class_ttn, classification_accuracy_ttn
 export TTNInternalCut, ttn_subtree_leaves, ttn_internal_cuts, ttn_layer_entropy_summary
+
+# ── QUBO / Ising combinatorial optimisation ───────────────────────────────────
+export QUBOProblem, ChainQUBOProblem
+export qubo_energy, dense_qubo, chain_qubo_from_dense
+export random_qubo, maxcut_qubo, maxcut_path_qubo, number_partition_qubo
+export portfolio_selection_qubo, portfolio_markowitz_energy, optimize_portfolio_exact_k
+export qubo_brute_force, qubo_local_search, qubo_simulated_annealing
+export chain_qubo_exact_dp, ising_to_qubo
+export mps_bit_index, bit_mps_index
+export optimize_qubo, qubo_solver_compare
+export qubo_mps_dmrg_chain, mps_chain_map_config, local_chain_field
 
 end # module MPSFast
