@@ -59,6 +59,9 @@ include("portfolio_loop.jl")
 include("ttn.jl")
 include("market_making.jl")
 include("dmrg.jl")
+include("market_making_imtime.jl")
+include("market_making_experiments.jl")
+include("market_making_bounds.jl")
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 export mps_amplitude
@@ -161,5 +164,22 @@ export exact_ground_states, tt_svd, mps_to_lex_vector, lex_vector_to_tensor
 export bipartite_entropies_exact, central_grid_edges, quote_log_ratio_errors
 export align_and_normalize
 export dmrg_ground_state, dmrg_excited_state, dmrg_residual, dmrg_energy
+export report_benchmark_model, random_factor_model, permute_factor_model
+export seriation_order, correlation_chain_order
+export minimal_chi_dmrg, phase_diagram_point, dmrg_relative_residual
+export product_diagonal_ground_state, gaussian_harmonic_G, gaussian_quote_rmse
+export finite_horizon_quote_convergence, finite_horizon_mps_convergence, krylov_expmv
+export mps_imaginary_time_evolution, imtime_sweep!, dense_to_mps, mps_to_dense_lex
+export factor_grid_quote_rmse, baseline_quote_comparison, factor_grid_ground_state
+export phase_diagram_sweep, default_phase_diagram_specs
+export doob_rates_from_phi, simulate_doob_chain, doob_occupancy_error, doob_mixing_steps
+export factor_coupling_strength, max_site_dim, max_cut_hilbert_dim, max_symmetric_cut_dim, hamiltonian_spectral_gap
+export exact_ground_state_vector
+export inventory_moments, connected_inventory_correlations, separation_correlation_profile
+export correlation_length_estimate, max_bipartite_entropy
+export diagonal_product_ground_state, state_fidelity, fannes_entropy_bound
+export factor_coupling_fannes_bound, factor_coupling_perturbation_bound
+export hastings_entropy_bound, correlation_length_gap_bound, area_law_from_correlation_length
+export chi_from_entropy_bound, entropy_bounds_audit, entropy_bounds_sweep
 
 end # module MPSFast
