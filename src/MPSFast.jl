@@ -55,6 +55,7 @@ include("io.jl")
 include("Encoders.jl")
 include("qubo.jl")
 include("qubo_opt.jl")
+include("portfolio_loop.jl")
 include("ttn.jl")
 
 # ── Core ──────────────────────────────────────────────────────────────────────
@@ -142,5 +143,12 @@ export chain_qubo_exact_dp, ising_to_qubo
 export mps_bit_index, bit_mps_index
 export optimize_qubo, qubo_solver_compare
 export qubo_mps_dmrg_chain, mps_chain_map_config, local_chain_field
+
+# ── Generative → QUBO portfolio loop ───────────────────────────────────────────
+export estimate_return_moments, gaussian_return_scenarios, factor_return_scenarios
+export path_log_returns, train_factor_mps, mps_factor_return_scenarios
+export generative_portfolio_qubo_loop, equal_weight_portfolio_stats
+export compare_generative_portfolio_sources, simulate_random_walk_prices
+export demo_generative_portfolio_loop
 
 end # module MPSFast
